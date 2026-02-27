@@ -1,0 +1,7 @@
+- ideia ok
+- SRP
+- buildar em cima do pennylane
+- padrão do projeto (guideline)
+- DI
+- docstring google style
+
