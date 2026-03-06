@@ -1,22 +1,50 @@
+from abc import ABC, abstractmethod
+
+import numpy as np
 import pennylane as qml
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
+
+from .projectors import DimensionalityProjector, PCAProjector
 
 
-class AngleEncoding:
-    def __init__(self):
-        self._scaler = None
-        self._pca = None
+class Encoding(ABC):
+    @abstractmethod
+    def fit(self, X, n_qubits: int) -> None:
+        ...
 
-    def fit(self, X, n_qubits):
-        self._scaler = StandardScaler()
-        X_scaled = self._scaler.fit_transform(X)
-        self._pca = PCA(n_components=n_qubits)
-        self._pca.fit(X_scaled)
+    @abstractmethod
+    def transform(self, X) -> np.ndarray:
+        ...
 
-    def transform(self, X):
-        X_scaled = self._scaler.transform(X)
-        return self._pca.transform(X_scaled)
+    @abstractmethod
+    def apply(self, x, wires) -> None:
+        ...
 
-    def apply(self, x, wires):
+
+class PhaseEncoding(Encoding):
+    def __init__(self, projector: DimensionalityProjector = None):
+        self._projector = projector if projector is not None else PCAProjector()
+
+    def fit(self, X, n_qubits: int) -> None:
+        self._projector.fit(X, n_qubits)
+
+    def transform(self, X) -> np.ndarray:
+        return self._projector.transform(X)
+
+    def apply(self, x, wires) -> None:
+        for w in wires:
+            qml.Hadamard(wires=w)
+        qml.AngleEmbedding(x, wires=wires, rotation='Z')
+
+
+class AngleEncoding(Encoding):
+    def __init__(self, projector: DimensionalityProjector = None):
+        self._projector = projector if projector is not None else PCAProjector()
+
+    def fit(self, X, n_qubits: int) -> None:
+        self._projector.fit(X, n_qubits)
+
+    def transform(self, X) -> np.ndarray:
+        return self._projector.transform(X)
+
+    def apply(self, x, wires) -> None:
         qml.AngleEmbedding(x, wires=wires, rotation='Z')

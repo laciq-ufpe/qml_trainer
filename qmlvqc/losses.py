@@ -1,7 +1,20 @@
+from abc import ABC, abstractmethod
+
+import numpy as np
 import pennylane.numpy as pnp
 
 
-class BCE:
+class Loss(ABC):
+    @abstractmethod
+    def __call__(self, predictions, targets) -> float:
+        ...
+
+    @abstractmethod
+    def to_label(self, raw: np.ndarray) -> np.ndarray:
+        ...
+
+
+class BCE(Loss):
     def __init__(self, epsilon=1e-7):
         self.epsilon = epsilon
 
