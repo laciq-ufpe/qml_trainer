@@ -4,6 +4,7 @@ from .losses import Loss, BCE
 from .encodings import Encoding, AngleEncoding, PhaseEncoding
 from .projectors import DimensionalityProjector, PCAProjector
 from .data import load_wisconsin
+from .executors import PennylaneExecutor
 
 __all__ = [
     "VQC",
@@ -17,4 +18,5 @@ __all__ = [
     "DimensionalityProjector",
     "PCAProjector",
     "load_wisconsin",
+    "PennylaneExecutor"
 ]
