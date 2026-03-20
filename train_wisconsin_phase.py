@@ -10,7 +10,7 @@ model = VQC(
     architecture=StronglyEntangled(n_layers=3),
     loss=BCE(),
     encoding=PhaseEncoding(),
-    executor=executor
+    executor=executor,
 )
 
 model.fit(X_train, y_train, epochs=10, lr=1e-3, batch_size=32)
