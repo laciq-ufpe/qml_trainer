@@ -4,7 +4,6 @@ import pennylane.numpy as pnp
 
 from ..architectures import Architecture
 from ..encodings import AngleEncoding, Encoding
-from ..executors import PennylaneExecutor, BaseExecutor
 from ..losses import Loss
 from .base_trainer import Trainer
 
@@ -17,17 +16,25 @@ class VQC(Trainer):
         architecture: Architecture,
         loss: Loss,
         encoding: Encoding = None,
-        executor: BaseExecutor = None,
     ):
         self.n_qubits = n_qubits
         self.architecture = architecture
         self.loss = loss
         self.encoding = encoding if encoding is not None else AngleEncoding()
-        self.executor = executor if executor is not None else PennylaneExecutor(n_qubits)
 
+        self._dev = qml.device("default.qubit", wires=n_qubits)
         self._weights = None
         self._bias = None
         self.history_: list[float] = []
+
+    def _circuit(self, x, weights, bias):
+        @qml.qnode(self._dev)
+        def circuit():
+            self.encoding.apply(x, wires=range(self.n_qubits))
+            self.architecture.apply(weights, wires=range(self.n_qubits))
+            return qml.expval(qml.PauliZ(0))
+
+        return circuit() + bias
 
     def fit(
         self,
@@ -68,7 +75,7 @@ class VQC(Trainer):
 
                 def cost(weights, bias):
                     preds = pnp.array([
-                        self.executor.execute(self.encoding, self.architecture, x, weights, bias)
+                        self._circuit(x, weights, bias)
                         for x in X_batch
                     ])
                     return self.loss(preds, y_batch)
@@ -85,7 +92,7 @@ class VQC(Trainer):
     def predict(self, X: np.ndarray) -> np.ndarray:
         X_enc = self.encoding.transform(X)
         raw = np.array([
-            float(self.executor.execute(self.encoding, self.architecture, x, self._weights, self._bias))
+            float(self._circuit(x, self._weights, self._bias))
             for x in X_enc
         ])
         return self.loss.to_label(raw)

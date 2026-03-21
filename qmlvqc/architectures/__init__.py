@@ -1,5 +1,6 @@
 from .base_architecture import Architecture
 from .strongly_entangled import StronglyEntangled
 from .basic_entangler import BasicEntangler
+from .custom_rot import CustomRot
 
-__all__ = ["Architecture", "StronglyEntangled", "BasicEntangler"]
+__all__ = ["Architecture", "StronglyEntangled", "BasicEntangler", "CustomRot"]
