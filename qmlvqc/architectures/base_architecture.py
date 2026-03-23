@@ -9,3 +9,7 @@ class Architecture(ABC):
     @abstractmethod
     def apply(self, weights, wires) -> None:
         ...
+
+
+class JaxArchitecture(Architecture):
+    """Marker base class for JAX-traceable architectures."""

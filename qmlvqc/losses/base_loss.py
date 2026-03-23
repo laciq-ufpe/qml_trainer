@@ -11,3 +11,7 @@ class Loss(ABC):
     @abstractmethod
     def to_label(self, raw: np.ndarray) -> np.ndarray:
         ...
+
+
+class JaxLoss(Loss):
+    """Marker base class for JAX-traceable losses."""

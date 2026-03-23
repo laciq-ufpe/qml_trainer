@@ -1,9 +1,9 @@
 import pennylane as qml
 
-from .base_architecture import Architecture
+from .base_architecture import Architecture, JaxArchitecture
 
 
-class StronglyEntangled(Architecture):
+class StronglyEntangled(JaxArchitecture):
     def __init__(self, n_layers: int = 2):
         self.n_layers = n_layers
 
