@@ -72,6 +72,10 @@ class VQCJax(Trainer):
         self.encoding.fit(X_train, self.n_qubits)
         X_enc = self.encoding.transform(X_train)
 
+        # 🔥 ADICIONE AQUI
+        X_enc = jnp.array(X_enc)
+        y_train = jnp.array(y_train)
+
         weight_shape = self.architecture.weight_shape(self.n_qubits)
         key = jax.random.PRNGKey(self._seed)
         key, w_key = jax.random.split(key)
@@ -108,22 +112,30 @@ class VQCJax(Trainer):
 
         for epoch in range(epochs):
             t_epoch_start = time.perf_counter()
-            perm = np.random.permutation(n_samples)
-            X_shuffled, y_shuffled = X_enc[perm], y_train[perm]
+            perm = jax.random.permutation(jax.random.PRNGKey(epoch), n_samples)
+            X_shuffled = X_enc[perm]
+            y_shuffled = y_train[perm]
             epoch_loss, n_batches = 0.0, 0
 
             for start in range(0, n_samples, batch_size):
                 end = start + batch_size
+
                 X_b = X_shuffled[start:end]
                 y_b = y_shuffled[start:end]
-                real = len(X_b)
-                if real < batch_size:
-                    pad = batch_size - real
-                    X_b = np.pad(X_b, ((0, pad), (0, 0)))
-                    y_b = np.pad(y_b, (0, pad))
-                mask = jnp.array([1.0] * real + [0.0] * (batch_size - real))
-                X_batch = jnp.array(X_b)
-                y_batch = jnp.array(y_b)
+
+                real = X_b.shape[0]
+                pad = batch_size - real
+
+                # 🔥 usar jnp.pad (não numpy)
+                X_b = jnp.pad(X_b, ((0, pad), (0, 0)))
+                y_b = jnp.pad(y_b, (0, pad))
+
+                # 🔥 máscara JAX-friendly (SEM lista Python)
+                mask = (jnp.arange(batch_size) < real).astype(jnp.float32)
+
+                # 🔥 NÃO recriar jnp.array aqui
+                X_batch = X_b
+                y_batch = y_b
                 params, opt_state, loss_val = update_step(params, opt_state, X_batch, y_batch, mask)
                 epoch_loss += float(loss_val)
                 n_batches += 1
