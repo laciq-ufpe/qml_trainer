@@ -15,7 +15,7 @@ model = VQCJax(
     encoding=PhaseEncodingJax(),
     seed=42,
 )
-model.fit(X_train, y_train, epochs=20, lr=1e-4, batch_size=255)
+model.fit(X_train, y_train, epochs=10, lr=1e-4, batch_size=255)
 
 print("Train acc:", model.score(X_train, y_train))
 print("Test acc: ", model.score(X_test, y_test))

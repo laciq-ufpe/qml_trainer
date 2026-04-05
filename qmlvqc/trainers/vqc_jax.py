@@ -13,18 +13,54 @@ from ..encodings.base_encoding import JaxEncoding
 from ..losses.base_loss import JaxLoss
 from .base_trainer import Trainer
 
+jax.config.update("jax_log_compiles", True)
+
 logger = logging.getLogger(__name__)
+
+DIAGNOSE_RECOMPILATION = True
+
+
+def create_batches(X, y, batch_size):
+    n = X.shape[0]
+    pad = (batch_size - n % batch_size) % batch_size
+    X = jnp.pad(X, ((0, pad), (0, 0)))
+    y = jnp.pad(y, (0, pad))
+    X = X.reshape(-1, batch_size, X.shape[1])
+    y = y.reshape(-1, batch_size)
+    return X, y
+
+
+#  Elimina weak_type de todos os arrays do pytree
+# antes da primeira chamada ao JIT. O opt_state do Optax (incluindo o
+# contador 'count' do Adam) é inicializado com weak_type=True, o que faz
+# o JAX tratar cada chamada como uma assinatura de tipos diferente e recompilar.
+def _cast_to_concrete(tree):
+    def cast(x):
+        if not isinstance(x, jnp.ndarray):
+            return x
+        if x.dtype in (jnp.float32, jnp.float64):
+            return x.astype(jnp.float32)
+        if x.dtype in (jnp.int32, jnp.int64):
+            return x.astype(jnp.int32)
+        return x
+    return jax.tree_util.tree_map(cast, tree)
+
+
+class _CompileCounter(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.count = 0
+        self.last_msg = ""
+
+    def emit(self, record):
+        msg = record.getMessage()
+        if "Compiling jit(update_step)" in msg:
+            self.count += 1
+            self.last_msg = msg
+            print(f"\nRECOMPILAÇÃO REAL #{self.count}: {msg}\n")
 
 
 class VQCJax(Trainer):
-    """
-    VQC trainer using JAX autodiff + Optax optimization.
-
-    Requires JaxArchitecture, JaxEncoding, and JaxLoss — all must be
-    broadcast-based and JAX-traceable. The circuit uses adjoint differentiation
-    and the entire update step (batched forward, loss, backward, optimizer) is
-    compiled into a single XLA program via jax.jit.
-    """
 
     def __init__(self, n_qubits, architecture, loss, encoding=None, seed=0):
         if not isinstance(architecture, JaxArchitecture):
@@ -60,32 +96,54 @@ class VQCJax(Trainer):
             self.architecture.apply(weights, wires=range(self.n_qubits))
             return qml.expval(qml.PauliZ(0))
 
-        # vmap only — jit is applied over the full update_step so the entire
-        # forward pass, loss, adjoint backward, and optimizer update compile
-        # as a single XLA program.
         return jax.vmap(circuit, in_axes=(0, None))
 
     def fit(self, X_train, y_train, epochs=50, lr=0.01, batch_size=16):
         t_fit_start = time.perf_counter()
 
+        compile_counter = _CompileCounter()
+        if DIAGNOSE_RECOMPILATION:
+            logging.getLogger("jax._src.interpreters.pxla").addHandler(compile_counter)
+
         logger.info("Applying encoding (%s)...", type(self.encoding).__name__)
         self.encoding.fit(X_train, self.n_qubits)
         X_enc = self.encoding.transform(X_train)
 
-        # 🔥 ADICIONE AQUI
-        X_enc = jnp.array(X_enc)
-        y_train = jnp.array(y_train)
+        # dtype explícito evita weak_type nos arrays de entrada
+        X_enc   = jnp.array(X_enc,   dtype=jnp.float32)
+        y_train = jnp.array(y_train, dtype=jnp.float32)
 
         weight_shape = self.architecture.weight_shape(self.n_qubits)
         key = jax.random.PRNGKey(self._seed)
         key, w_key = jax.random.split(key)
-        self._weights = jax.random.uniform(w_key, shape=weight_shape, minval=0.0, maxval=2 * jnp.pi)
-        self._bias = jnp.array(0.0)
+
+        # dtype e minval/maxval explícitos evitam weak_type nos pesos
+        self._weights = jax.random.uniform(
+            w_key,
+            shape=weight_shape,
+            dtype=jnp.float32,
+            minval=jnp.float32(0.0),
+            maxval=jnp.float32(2 * jnp.pi),
+        )
+
+        # dtype explícito evita weak_type no bias (principal causa de recompilação)
+        self._bias = jnp.array(0.0, dtype=jnp.float32)
 
         logger.info("Building update_step (jit+vmap+adjoint) — first call will trigger XLA compilation...")
         batched_circuit = self._build_circuit()
         optimizer = optax.adam(learning_rate=lr)
-        opt_state = optimizer.init((self._weights, self._bias))
+
+        params    = (self._weights, self._bias)
+        opt_state = optimizer.init(params)
+
+        # elimina weak_type do opt_state (ex: contador 'count' do Adam)
+        # e dos params antes da primeira chamada JIT
+        opt_state = _cast_to_concrete(opt_state)
+        params    = _cast_to_concrete(params)
+
+        # máscara criada uma única vez fora do loop para que
+        # shape e dtype nunca variem entre chamadas ao JIT
+        mask = jnp.ones(batch_size, dtype=jnp.float32)
 
         def cost(params, X_batch, y_batch, mask):
             w, b = params
@@ -94,67 +152,83 @@ class VQCJax(Trainer):
 
         @jax.jit
         def update_step(params, opt_state, X_batch, y_batch, mask):
-            print(" Compilando")
             loss_val, grads = jax.value_and_grad(cost)(params, X_batch, y_batch, mask)
             updates, new_opt_state = optimizer.update(grads, opt_state)
             new_params = optax.apply_updates(params, updates)
             return new_params, new_opt_state, loss_val
 
-        params = (self._weights, self._bias)
-        n_samples = len(X_enc)
+        n_samples     = len(X_enc)
         self.history_ = []
 
         logger.info(
             "Starting training loop | epochs=%d  lr=%g  batch_size=%d  n_samples=%d",
             epochs, lr, batch_size, n_samples,
         )
+
+        _compiles_before_loop = compile_counter.count
         t_train_start = time.perf_counter()
 
         for epoch in range(epochs):
             t_epoch_start = time.perf_counter()
-            perm = jax.random.permutation(jax.random.PRNGKey(epoch), n_samples)
+
+            perm       = jax.random.permutation(jax.random.PRNGKey(epoch), n_samples)
             X_shuffled = X_enc[perm]
             y_shuffled = y_train[perm]
+
+            X_batches, y_batches = create_batches(X_shuffled, y_shuffled, batch_size)
+
             epoch_loss, n_batches = 0.0, 0
 
-            for start in range(0, n_samples, batch_size):
-                end = start + batch_size
+            for i in range(X_batches.shape[0]):
+                X_batch = X_batches[i]
+                y_batch = y_batches[i]
 
-                X_b = X_shuffled[start:end]
-                y_b = y_shuffled[start:end]
+                params, opt_state, loss_val = update_step(
+                    params, opt_state, X_batch, y_batch, mask
+                )
 
-                real = X_b.shape[0]
-                pad = batch_size - real
+                loss_val.block_until_ready()
 
-                # usar jnp.pad (não numpy)
-                X_b = jnp.pad(X_b, ((0, pad), (0, 0)))
-                y_b = jnp.pad(y_b, (0, pad))
-
-                # máscara JAX-friendly (SEM lista Python)
-                mask = (jnp.arange(batch_size) < real).astype(jnp.float32)
-
-                # NÃO recriar jnp.array aqui
-                X_batch = X_b
-                y_batch = y_b
-                params, opt_state, loss_val = update_step(params, opt_state, X_batch, y_batch, mask)
                 epoch_loss += float(loss_val)
-                n_batches += 1
+                n_batches  += 1
 
-            mean_loss = epoch_loss / n_batches
+            mean_loss  = epoch_loss / n_batches
             self.history_.append(mean_loss)
             epoch_time = time.perf_counter() - t_epoch_start
-            print(f"Epoch {epoch + 1:3d}/{epochs} | loss: {mean_loss:.4f} | time: {epoch_time:.2f}s")
+
+            recompiles = compile_counter.count - _compiles_before_loop
+            print(
+                f"Epoch {epoch + 1:3d}/{epochs}"
+                f" | loss: {mean_loss:.4f}"
+                f" | time: {epoch_time:.2f}s"
+                f" | recompilações reais: {recompiles}"
+            )
 
         self._weights, self._bias = params
         training_time = time.perf_counter() - t_train_start
-        total_time = time.perf_counter() - t_fit_start
-        logger.info("Training complete | training time: %.2fs | total fit time: %.2fs", training_time, total_time)
+        total_time    = time.perf_counter() - t_fit_start
+
+        if DIAGNOSE_RECOMPILATION:
+            recompiles = compile_counter.count - _compiles_before_loop
+            print(f"\n{'='*60}")
+            print(f"  Total de recompilações de update_step durante treino: {recompiles}")
+            if recompiles <= 1:
+                print("  ✅ Apenas a compilação inicial — JIT cache está funcionando!")
+            else:
+                print("  ⚠️  Mais de 1 compilação — ainda há recompilação real acontecendo.")
+            print(f"{'='*60}\n")
+            logging.getLogger("jax._src.interpreters.pxla").removeHandler(compile_counter)
+
+        logger.info(
+            "Training complete | training time: %.2fs | total fit time: %.2fs",
+            training_time, total_time,
+        )
 
         self._circuit = jax.jit(batched_circuit)
 
     def predict(self, X):
-        X_enc = jnp.array(self.encoding.transform(X))
-        raw = np.array(self._circuit(X_enc, self._weights) + self._bias)
+        X_enc = jnp.array(self.encoding.transform(X), dtype=jnp.float32)
+        raw   = np.array(self._circuit(X_enc, self._weights) + self._bias)
         return self.loss.to_label(raw)
 
     def score(self, X, y):
