@@ -15,3 +15,7 @@ class Encoding(ABC):
     @abstractmethod
     def apply(self, x: np.ndarray, wires) -> None:
         ...
+
+
+class JaxEncoding(Encoding):
+    """Marker base class for JAX-traceable encodings."""
